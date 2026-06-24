@@ -48,6 +48,18 @@ export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
     summary: "BM25 full-text search backed by the SQLite FTS5 inverted index."
   },
 
+  // --- Index maintenance (1 entry) — registered directly by buildMcpServer()
+  //     (not a register*Tools fn, to keep the syncFtsIndex import local and
+  //     avoid a server.ts <-> tool-registry.ts circular import). Gated on a
+  //     persistent FTS index. Lets a client force an immediate refresh after
+  //     out-of-band edits instead of waiting on the --watch incremental.
+  {
+    name: "obsidian_reindex",
+    kind: "read",
+    gating: "--persistent-index",
+    summary: "Force an immediate FTS5 search-index refresh after out-of-band edits."
+  },
+
   // --- Always-on read tools (33 entries) — registered by registerReadTools()
   //     OUTSIDE the `if (diagnosticSearchTools)` blocks.
   {

@@ -1310,9 +1310,11 @@ export async function getNoteNeighbors(
   const targetTagsLower = new Set(targetParsed.tags.map((t) => t.toLowerCase()));
 
   // Outbound: resolved unique destinations from the target.
+  // Count embeds (`![[Note#Heading]]`) as edges too — they are backlinks in
+  // Obsidian's own model, and getBacklinks() already merges them this way.
   const seenOut = new Set<string>();
   const outbound: NoteNeighbors["outbound"] = [];
-  for (const link of targetParsed.wikilinks) {
+  for (const link of [...targetParsed.wikilinks, ...targetParsed.embeds]) {
     const m = findBestMatch(entries, link.target, target.relPath);
     if (!m || seenOut.has(m.relPath)) continue;
     seenOut.add(m.relPath);
@@ -1327,7 +1329,8 @@ export async function getNoteNeighbors(
     if (e.absPath === target.absPath) continue;
     const { parsed } = await vault.readNote(e.absPath, e.mtimeMs);
     let cnt = 0;
-    for (const link of parsed.wikilinks) {
+    // Embeds (`![[Note#Heading]]`) are inbound backlinks too — include them.
+    for (const link of [...parsed.wikilinks, ...parsed.embeds]) {
       const m = findBestMatch(entries, link.target, e.relPath);
       if (m && m.absPath === target.absPath) cnt += 1;
     }

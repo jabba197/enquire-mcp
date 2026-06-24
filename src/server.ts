@@ -691,6 +691,51 @@ export function buildMcpServer(deps: ServerDeps, opts: ServeOptions): McpServer 
   if (deps.ftsIndex && opts.diagnosticSearchTools) registerFtsTools(server, deps.ftsIndex, deps.vault);
   registerResources(server, deps.vault);
   if (deps.ftsIndex) registerChunkResource(server, deps.ftsIndex, deps.vault);
+
+  // obsidian_reindex — force an immediate refresh of the on-disk keyword/BM25
+  // (FTS5) search index so notes edited out-of-band (e.g. via the cyanheads EDIT
+  // MCP or another editor) are searchable at once, instead of waiting on the
+  // --watch incremental to settle. Mtime-keyed, so only changed files are
+  // reprocessed: cheap and safe to call after a batch of writes. Only available
+  // when a persistent FTS index exists (--persistent-index).
+  if (deps.ftsIndex) {
+    const reindexFtsIndex = deps.ftsIndex;
+    const reindexVault = deps.vault;
+    server.registerTool(
+      "obsidian_reindex",
+      {
+        title: "Reindex (refresh search)",
+        description:
+          "Force an immediate refresh of the keyword/BM25 (FTS5) search index so just-edited or just-created notes become searchable right away, without waiting for the background --watch indexer to settle. Mtime-keyed: only files whose mtime changed are reprocessed, so it is cheap and safe to call after a batch of writes (e.g. right after editing notes via another MCP). Returns how many notes (and PDF chunks, if enabled) were added/updated/removed/unchanged. Refreshes the text index that produces search snippets; ML embeddings continue to refresh via the live watcher.",
+        annotations: {
+          title: "Reindex (refresh search)",
+          readOnlyHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        },
+        inputSchema: {}
+      },
+      async () => {
+        const markdown = await syncFtsIndex(reindexVault, reindexFtsIndex);
+        let pdf: Awaited<ReturnType<typeof syncPdfFtsIndex>> | undefined;
+        try {
+          pdf = await syncPdfFtsIndex(reindexVault, reindexFtsIndex);
+        } catch (err) {
+          process.stderr.write(
+            `enquire: obsidian_reindex PDF sync skipped — ${err instanceof Error ? err.message : String(err)}\n`
+          );
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ ok: true, markdown, ...(pdf ? { pdf } : {}) }, null, 2)
+            }
+          ]
+        };
+      }
+    );
+  }
   registerPrompts(server);
 
   // v2.0.0-beta.1: warn on unknown names AFTER all tools are registered.

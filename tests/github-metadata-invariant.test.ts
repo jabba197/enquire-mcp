@@ -59,6 +59,35 @@ interface RepoMeta {
   topics: string[];
 }
 
+/**
+ * jabba-patches — is this checkout the repo the invariant is about?
+ *
+ * The assertions below describe `oomkapwn/enquire-mcp`'s GitHub About text and
+ * Topics — metadata only its owner can set. In a fork that is not a claim we
+ * can hold or fix: upstream edits its About copy out-of-band (it did, after our
+ * 3.10.1 pin), and the test goes red forever through no fault of the code. A
+ * permanently red test is worse than no test, because it trains you to skim
+ * past failures — including real ones.
+ *
+ * So gate on the origin remote. In upstream's own checkout this runs exactly as
+ * before; in a fork it no-ops like the missing-`gh` case. Deliberately NOT
+ * `it.skip` — the surrounding suite keeps its `it()` count constant because
+ * `tests/docs-consistency.test.ts` counts declarations for its test-count claim.
+ */
+function isUpstreamCheckout(): boolean {
+  try {
+    const origin = execSync("git remote get-url origin", {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    // Match owner/name irrespective of https vs ssh form or a .git suffix.
+    return new RegExp(`[/:]${REPO}(\\.git)?/?$`, "i").test(origin.trim());
+  } catch {
+    // No git, no remote, not a checkout — treat as "not upstream" and no-op.
+    return false;
+  }
+}
+
 function fetchRepoMeta(): RepoMeta | null {
   const res = spawnSync("gh", ["api", `repos/${REPO}`, "--jq", "{description, topics}"], {
     encoding: "utf8",
@@ -117,7 +146,9 @@ describe("GitHub repo metadata invariant (v3.7.0 + v3.7.4 negative-control)", ()
   // for its test-count claim; conditional `it.skip` would fluctuate the
   // count. Instead, each test early-returns when `gh` isn't available —
   // the test "passes" without asserting (treated as a no-op skip).
-  const available = ghIsAvailable();
+  // jabba-patches — also require that this checkout owns the metadata being
+  // asserted on (see isUpstreamCheckout). Forks no-op instead of failing.
+  const available = ghIsAvailable() && isUpstreamCheckout();
 
   // v3.9.0-rc.26 (rc.25-audit MED-1) — CI-GUARD tripwire. The two metadata
   // invariants below early-return when `gh` isn't authenticated, which is correct

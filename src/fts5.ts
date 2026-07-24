@@ -382,6 +382,25 @@ export class FtsIndex {
     return { added, updated, deleted, unchanged };
   }
 
+  /**
+   * Stored index state for a single source file, or `null` when the file has
+   * no `source_state` row (i.e. it is not in the index).
+   *
+   * Exposed so a caller can VERIFY that the index reflects a specific file's
+   * current on-disk mtime, rather than inferring it from aggregate counters.
+   * A sync that reports `updated: 0` is ambiguous — it means either "the
+   * watcher already caught it" or "the sync never saw it" — and the two are
+   * indistinguishable without the per-file mtime.
+   */
+  sourceState(relPath: string): { indexedAt: number; mtimeMs: number; nChunks: number } | null {
+    const db = this.requireDb();
+    const row = db
+      .prepare("SELECT mtime_ms, n_chunks, indexed_at FROM source_state WHERE rel_path = ?")
+      .get<{ mtime_ms: number; n_chunks: number; indexed_at: number }>(relPath);
+    if (!row) return null;
+    return { indexedAt: row.indexed_at, mtimeMs: row.mtime_ms, nChunks: row.n_chunks };
+  }
+
   /** Drop a file's chunks + state row. Idempotent.
    *
    * v3.7.18 R-8 — wrapped in `db.transaction()` for atomicity. Pre-3.7.18

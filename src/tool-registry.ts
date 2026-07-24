@@ -169,7 +169,7 @@ export function registerReadTools(
     {
       title: "Read note",
       description:
-        'Read a note by relative path or by title (filename without .md). Default `format: "full"` returns content + frontmatter + wikilinks + embeds + tags. `format: "map"` returns just headings + frontmatter keys + counts (no body) — useful for planning a surgical edit without paying token cost for the body. Title accepts periodic-note aliases ("today"/"daily"/"weekly"/"monthly") that resolve to the standard `YYYY-MM-DD`/`YYYY-Www`/`YYYY-MM` names. Errors include `Did you mean: ...` suggestions on near-misses.',
+        'Read a note by relative path or by title (filename without .md). Default `format: "full"` returns content + frontmatter + wikilinks + embeds + tags. `format: "map"` returns just headings + frontmatter keys + counts (no body) — useful for planning a surgical edit without paying token cost for the body. Inline `data:` URI payloads (pasted screenshots etc.) are elided by default and replaced with a marker naming the media type and the number of characters removed; pass `include_data_uris: true` when you actually need the raw base64. Title accepts periodic-note aliases ("today"/"daily"/"weekly"/"monthly") that resolve to the standard `YYYY-MM-DD`/`YYYY-Www`/`YYYY-MM` names. Errors include `Did you mean: ...` suggestions on near-misses.',
       annotations: { ...READ_ONLY, title: "Read note" },
       inputSchema: {
         path: z.string().optional().describe("Path relative to vault root, with or without .md"),
@@ -180,7 +180,13 @@ export function registerReadTools(
         format: z
           .enum(["full", "map"])
           .optional()
-          .describe('"full" (default) returns body + parsed metadata. "map" returns just headings + counts.')
+          .describe('"full" (default) returns body + parsed metadata. "map" returns just headings + counts.'),
+        include_data_uris: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return inline `data:` URI payloads verbatim instead of eliding them (default false). Only set this when you need the actual base64 — a single pasted screenshot can be hundreds of KB."
+          )
       }
     },
     async (args) => textResult(await readNote(vault, args))

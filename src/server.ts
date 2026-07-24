@@ -1,11 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 import { EmbedDb, hnswPersistBase, peekEmbedDbMeta } from "./embed-db.js";
 import { embedSingleNote, embedSinglePdf } from "./embed-pipeline.js";
 import { type loadEmbedder, resolveModel } from "./embeddings.js";
 import { defaultIndexFile, FtsIndex, peekFtsMetaSafe } from "./fts5.js";
 import { VERSION } from "./index.js";
 import { registerPrompts } from "./prompts.js";
+import {
+  DEFAULT_REINDEX_REPORTED_PATHS,
+  MAX_REINDEX_REPORTED_PATHS,
+  MAX_REINDEX_VERIFY_PATHS,
+  verifyIndexedPaths
+} from "./reindex-report.js";
 import { parseRecencyConfig } from "./retrieval-opts.js";
 import { shutdownStdioDeps } from "./shutdown.js";
 import {
@@ -18,6 +25,7 @@ import {
   registerWriteTools
 } from "./tool-registry.js";
 import { Vault } from "./vault.js";
+import { labelToolConfig, resolveVaultLabel } from "./vault-label.js";
 import { VaultWatcher } from "./watcher.js";
 
 /**
@@ -57,6 +65,11 @@ export interface ServeOptions {
   readPaths?: string[];
   /** Enable the filesystem watcher (auto-reindex on change). */
   watch?: boolean;
+  /** Short human name of the vault this process serves (e.g. "QVC (work)").
+   *  Prefixed onto every tool description + title so a client connected to
+   *  several enquire servers can tell identically-named tool sets apart.
+   *  Falls back to the `ENQUIRE_VAULT_LABEL` env var; unset = no prefix. */
+  vaultLabel?: string;
   /** Per-tool gating: deny list. Tools named here won't register. */
   disabledTools?: string[];
   /** Per-tool gating: allow list. Only listed tools register (deny still applies). */
@@ -639,7 +652,16 @@ export function buildMcpServer(deps: ServerDeps, opts: ServeOptions): McpServer 
   // HTTP: once on first session). Subsequent HTTP sessions reuse the same
   // gating decisions silently — no need to spam logs per request.
   const verbose = !deps.warningTracker.printed;
-  if (deps.disabledTools.size > 0 || deps.enabledTools.size > 0) {
+  // Deployment-identity label. One enquire process serves ONE vault, but every
+  // process exposes the same tool names — so a client connected to a personal
+  // AND a work vault sees two identical `obsidian_search` entries whose only
+  // discriminator is the server prefix its UI happens to render. Tool-search
+  // results and truncated listings routinely drop that prefix, which turns
+  // "read the wrong vault" into a realistic mistake. Prefixing the description
+  // (and the display title) puts the vault inside the text the client actually
+  // matches and shows. CLI flag wins; env var is the container-friendly path.
+  const vaultLabel = resolveVaultLabel(opts.vaultLabel);
+  if (deps.disabledTools.size > 0 || deps.enabledTools.size > 0 || vaultLabel.length > 0) {
     const origRegisterTool = server.registerTool.bind(server) as (name: string, ...rest: unknown[]) => unknown;
     (server as unknown as { registerTool: (name: string, ...rest: unknown[]) => unknown }).registerTool = (
       name: string,
@@ -659,7 +681,7 @@ export function buildMcpServer(deps: ServerDeps, opts: ServeOptions): McpServer 
         if (verbose) process.stderr.write(`enquire: skipping tool ${name} (disabled by --disabled-tools)\n`);
         return undefined;
       }
-      return origRegisterTool(name, ...rest);
+      return origRegisterTool(name, ...(vaultLabel ? labelToolConfig(rest, vaultLabel) : rest));
     };
   }
 
@@ -706,16 +728,40 @@ export function buildMcpServer(deps: ServerDeps, opts: ServeOptions): McpServer 
       {
         title: "Reindex (refresh search)",
         description:
-          "Force an immediate refresh of the keyword/BM25 (FTS5) search index so just-edited or just-created notes become searchable right away, without waiting for the background --watch indexer to settle. Mtime-keyed: only files whose mtime changed are reprocessed, so it is cheap and safe to call after a batch of writes (e.g. right after editing notes via another MCP). Returns how many notes (and PDF chunks, if enabled) were added/updated/removed/unchanged. Refreshes the text index that produces search snippets; ML embeddings continue to refresh via the live watcher.",
+          "Force an immediate refresh of the keyword/BM25 (FTS5) search index so just-edited or just-created notes become searchable right away, without waiting for the background --watch indexer to settle. Mtime-keyed: only files whose mtime changed are reprocessed, so it is cheap and safe to call after a batch of writes (e.g. right after editing notes via another MCP). Returns how many notes (and PDF chunks, if enabled) were added/updated/removed/unchanged, PLUS the paths it actually touched. To CONFIRM the index reflects specific writes, pass `verify_paths` (the notes you just wrote) and/or `since` (ISO-8601): each candidate comes back with its on-disk mtime, the mtime stored in the index, and an `in_sync` verdict — so a report of `updated: 0` is no longer ambiguous between 'the watcher already caught it' and 'the sync never saw it'. Refreshes the text index that produces search snippets; ML embeddings continue to refresh via the live watcher.",
         annotations: {
           title: "Reindex (refresh search)",
           readOnlyHint: false,
           idempotentHint: true,
           openWorldHint: false
         },
-        inputSchema: {}
+        inputSchema: {
+          verify_paths: z
+            .array(z.string().max(1024))
+            .max(MAX_REINDEX_VERIFY_PATHS)
+            .optional()
+            .describe(
+              "Vault-relative note paths (with or without .md) to verify explicitly — typically the notes you just wrote. Each is reported with its on-disk mtime vs the mtime stored in the index."
+            ),
+          since: z
+            .string()
+            .max(64)
+            .optional()
+            .describe(
+              "ISO-8601 timestamp. Every note modified at/after this is verified against the index, the same way as `verify_paths`. Use the time just before your writes."
+            ),
+          max_paths: z.coerce
+            .number()
+            .int()
+            .positive()
+            .max(MAX_REINDEX_REPORTED_PATHS)
+            .optional()
+            .describe(
+              `Cap on how many paths are listed in \`changed_paths\` and \`checked\` (default ${DEFAULT_REINDEX_REPORTED_PATHS}). Counts are always exact; only the listings are truncated, and truncation is reported.`
+            )
+        }
       },
-      async () => {
+      async (args: { verify_paths?: string[]; since?: string; max_paths?: number }) => {
         const markdown = await syncFtsIndex(reindexVault, reindexFtsIndex);
         let pdf: Awaited<ReturnType<typeof syncPdfFtsIndex>> | undefined;
         try {
@@ -725,13 +771,52 @@ export function buildMcpServer(deps: ServerDeps, opts: ServeOptions): McpServer 
             `enquire: obsidian_reindex PDF sync skipped — ${err instanceof Error ? err.message : String(err)}\n`
           );
         }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ ok: true, markdown, ...(pdf ? { pdf } : {}) }, null, 2)
+
+        const cap = args.max_paths ?? DEFAULT_REINDEX_REPORTED_PATHS;
+        // `since` is parsed leniently: an unparseable value is reported back as
+        // ignored rather than failing the whole refresh, because the refresh —
+        // the primary effect — has already happened by this point.
+        let sinceMs: number | undefined;
+        let sinceIgnored: string | undefined;
+        if (args.since !== undefined) {
+          const parsed = Date.parse(args.since);
+          if (Number.isNaN(parsed)) sinceIgnored = args.since;
+          else sinceMs = parsed;
+        }
+
+        const checked = await verifyIndexedPaths(reindexVault, reindexFtsIndex, {
+          sinceMs,
+          verifyPaths: args.verify_paths
+        });
+
+        const truncate = (paths: string[]): string[] => paths.slice(0, cap);
+        const report = {
+          ok: true,
+          markdown: {
+            ...markdown,
+            changed_paths: {
+              added: truncate(markdown.changed_paths.added),
+              deleted: truncate(markdown.changed_paths.deleted),
+              updated: truncate(markdown.changed_paths.updated)
             }
-          ]
+          },
+          ...(pdf ? { pdf } : {}),
+          checked: checked.slice(0, cap),
+          checked_total: checked.length,
+          ...(checked.length > cap ? { checked_truncated: true } : {}),
+          ...(checked.some((c) => !c.in_sync)
+            ? {
+                warning:
+                  "One or more checked notes are NOT in sync with the index — see `in_sync: false` entries. A note absent from the index (indexed_mtime: null) may be excluded by --exclude-glob / --read-paths."
+              }
+            : {}),
+          ...(sinceIgnored !== undefined
+            ? { since_ignored: `Unparseable \`since\` value ignored: ${sinceIgnored}` }
+            : {})
+        };
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(report, null, 2) }]
         };
       }
     );
@@ -926,7 +1011,17 @@ export async function syncEmbedDb(
 export async function syncFtsIndex(
   vault: Vault,
   idx: FtsIndex
-): Promise<{ added: number; updated: number; deleted: number; unchanged: number; total_chunks: number }> {
+): Promise<{
+  added: number;
+  updated: number;
+  deleted: number;
+  unchanged: number;
+  total_chunks: number;
+  /** Paths this sync actually touched (added + updated + deleted). Lets a
+   *  caller see WHICH files moved, not just how many — an aggregate of 0 is
+   *  ambiguous between "nothing changed" and "the sync never saw the file". */
+  changed_paths: { added: string[]; updated: string[]; deleted: string[] };
+}> {
   const entries = await vault.listMarkdown();
   const live = entries.map((e) => ({ relPath: e.relPath, mtimeMs: e.mtimeMs }));
   // v2.8.0: scope to kind="md" so markdown-sync doesn't try to delete PDF
@@ -951,7 +1046,8 @@ export async function syncFtsIndex(
     updated: diff.updated.length,
     deleted: diff.deleted.length,
     unchanged: diff.unchanged.length,
-    total_chunks: idx.totalChunks()
+    total_chunks: idx.totalChunks(),
+    changed_paths: { added: diff.added, deleted: diff.deleted, updated: diff.updated }
   };
 }
 

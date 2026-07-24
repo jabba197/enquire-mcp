@@ -72,6 +72,15 @@ export const DISABLED_TOOLS_HELP =
  * serve had a 98-char full description, serve-http had a 56-char abbreviated
  * one. Canonical text uses serve's full version.
  */
+/**
+ * `--vault-label` flag help. Multi-vault operators run one enquire process per
+ * vault; every process exposes the same tool names, so a client connected to two
+ * of them cannot tell the tool sets apart from the descriptions alone. This
+ * label is prefixed onto each tool's description and title.
+ */
+export const VAULT_LABEL_HELP =
+  'Short human name of the vault this server serves (e.g. "QVC (work)"). Prefixed onto every tool description as `[Vault: <label>]` and appended to each tool title, so a client connected to several Obsidian MCP servers can tell identically-named tool sets apart — and is far less likely to read or write the wrong vault. Falls back to the ENQUIRE_VAULT_LABEL env var. Unset = no prefix (single-vault deployments).';
+
 export const ENABLED_TOOLS_HELP =
   "Strict allowlist — when set, ONLY listed tools register. Complement to --disabled-tools (denylist). If both are set: a tool must be in the allowlist AND not in the denylist. Repeatable. Example: `--enabled-tools obsidian_search_text obsidian_read_note obsidian_get_recent_edits`.";
 

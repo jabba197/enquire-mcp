@@ -15,6 +15,7 @@ import {
   PERSISTENT_INDEX_HELP,
   QUANTIZE_EMBEDDINGS_HELP,
   TOKENIZE_HELP,
+  VAULT_LABEL_HELP,
   WATCH_HELP
 } from "./cli-help.js";
 import { EmbedDb, peekEmbedDbMeta } from "./embed-db.js";
@@ -195,6 +196,7 @@ export async function main(): Promise<void> {
     .option("--watch", WATCH_HELP)
     .option("--disabled-tools <name...>", DISABLED_TOOLS_HELP)
     .option("--enabled-tools <name...>", ENABLED_TOOLS_HELP)
+    .option("--vault-label <label>", VAULT_LABEL_HELP)
     .option("--diagnostic-search-tools", DIAGNOSTIC_SEARCH_TOOLS_HELP);
   addAdvancedRetrievalOptions(serveCmd)
     .option("--quantize-embeddings <mode>", QUANTIZE_EMBEDDINGS_HELP)
@@ -262,6 +264,7 @@ export async function main(): Promise<void> {
     .option("--watch", WATCH_HELP)
     .option("--disabled-tools <name...>", DISABLED_TOOLS_HELP)
     .option("--enabled-tools <name...>", ENABLED_TOOLS_HELP)
+    .option("--vault-label <label>", VAULT_LABEL_HELP)
     .option("--diagnostic-search-tools", DIAGNOSTIC_SEARCH_TOOLS_HELP);
   // v3.8.0-rc.1 R-3 — apply the same advanced-retrieval flag set as
   // `serve` so HTTP-mode users can enable reranker / HNSW / PDF indexing /

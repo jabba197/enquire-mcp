@@ -109,6 +109,12 @@ export interface NoteReadFull {
   tags: string[];
   /** ISO-8601 modification timestamp. */
   mtime: string;
+  /** Number of inline `data:` URI payloads elided from `content`. Present
+   *  (and > 0) only when stripping actually removed something. */
+  data_uris_stripped?: number;
+  /** Characters removed by data-URI stripping. Present alongside
+   *  `data_uris_stripped`. */
+  data_uri_chars_stripped?: number;
 }
 
 /**
@@ -172,9 +178,52 @@ export interface NoteReadMap {
  * console.log(full.content);
  * ```
  */
+/**
+ * Payload length (characters) at or above which an inline `data:` URI is
+ * considered worth eliding. Below this a data URI is cheap enough that
+ * stripping it costs more in surprise than it saves in tokens.
+ */
+export const MIN_STRIPPED_DATA_URI_CHARS = 256;
+
+/**
+ * Elide the payloads of inline `data:` URIs from markdown.
+ *
+ * An Obsidian note that embeds a pasted screenshot inline carries the whole
+ * image as base64 in the body — hundreds of KB of one-token-per-3-chars noise
+ * that no agent can act on, and that can single-handedly blow a context
+ * window when a note is read to plan an edit. The URI is replaced with a
+ * marker that keeps the media type (so the reader still knows an image is
+ * there) and states how much was removed.
+ *
+ * Regex safety: every segment uses a single bounded/simple quantifier over a
+ * negated character class with no alternation and no nesting, so matching is
+ * linear in the input — the sink cannot be made to backtrack (see the
+ * project's ReDoS class history in CLAUDE.md).
+ *
+ * @param content - Markdown body to scrub.
+ * @returns The scrubbed body plus how many URIs / characters were removed.
+ */
+export function stripDataUris(content: string): { content: string; count: number; chars: number } {
+  if (!content.includes("data:")) return { content, count: 0, chars: 0 };
+  let count = 0;
+  let chars = 0;
+  // `data:<mediatype-and-params>,<payload>` — the payload class stops at
+  // whitespace, markdown-link close, quote or tag open, which are the
+  // terminators an inline data URI can actually have in a note.
+  const scrubbed = content.replace(/data:[^\s,)'"<]{0,200},[^\s)'"<]+/g, (match) => {
+    const comma = match.indexOf(",");
+    const payloadLength = match.length - comma - 1;
+    if (payloadLength < MIN_STRIPPED_DATA_URI_CHARS) return match;
+    count += 1;
+    chars += payloadLength;
+    return `${match.slice(0, comma + 1)}…[${payloadLength} chars of inline data elided — re-read with include_data_uris: true to see it]`;
+  });
+  return { content: scrubbed, count, chars };
+}
+
 export async function readNote(
   vault: Vault,
-  args: { path?: string; title?: string; format?: "full" | "map" }
+  args: { path?: string; title?: string; format?: "full" | "map"; include_data_uris?: boolean }
 ): Promise<NoteReadFull | NoteReadMap> {
   await vault.ensureExists();
   const entry = await resolveTarget(vault, args);
@@ -197,15 +246,22 @@ export async function readNote(
     };
   }
 
+  // Default-strip inline base64 payloads: an image-heavy note is otherwise
+  // unreadable in practice (one pasted screenshot can dwarf the entire vault's
+  // worth of prose). `include_data_uris: true` opts back into the raw body.
+  const stripped =
+    args.include_data_uris === true ? { content: parsed.body, count: 0, chars: 0 } : stripDataUris(parsed.body);
+
   return {
     path: entry.relPath,
     title: stripMd(entry.basename),
-    content: parsed.body,
+    content: stripped.content,
     frontmatter: parsed.frontmatter,
     wikilinks: parsed.wikilinks,
     embeds: parsed.embeds,
     tags: parsed.tags,
-    mtime: new Date(mtimeMs).toISOString()
+    mtime: new Date(mtimeMs).toISOString(),
+    ...(stripped.count > 0 ? { data_uris_stripped: stripped.count, data_uri_chars_stripped: stripped.chars } : {})
   };
 }
 
